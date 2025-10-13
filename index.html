@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Project X - Isometric WebGL MVP</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="mode-menu" class="overlay">
+      <h2>Project X Launcher</h2>
+      <p>Select how you want to explore the current build.</p>
+      <div class="menu-actions">
+        <button id="start-sandbox" class="primary">Developer Sandbox</button>
+        <button id="start-game" class="secondary">Game Mode (Coming Soon)</button>
+      </div>
+    </div>
+    <div id="mode-info" class="overlay info hidden"></div>
+    <div id="hud">
+      <h1>Project X</h1>
+      <p>
+        Move with <strong>WASD</strong>, sprint with <strong>Shift</strong>, and
+        avoid the red shamblers. Noise draws them in, warm light keeps them
+        lurking. Survive as long as you can.
+      </p>
+      <div id="status">
+        <span id="survival-time">0.0s</span>
+        <span id="player-health">Health: 100</span>
+      </div>
+    </div>
+    <div id="dev-toolbar" class="hidden">
+      <h3>Developer Sandbox</h3>
+      <div class="toolbar-row">
+        <button id="spawn-player">Spawn Player</button>
+        <button data-tool="player">Player Cursor</button>
+        <button id="remove-player">Despawn Player</button>
+        <button id="spawn-zombie">Spawn Zombie</button>
+        <button data-tool="zombie">Place Zombie</button>
+      </div>
+      <div class="toolbar-row">
+        <button data-tool="noise">Noise Cursor</button>
+        <button data-tool="light">Light Cursor</button>
+        <button data-tool="remove">Remove Zombie</button>
+        <button id="remove-all-zombies">Clear Zombies</button>
+      </div>
+      <div class="toolbar-row">
+        <button id="clear-stimuli">Clear Pulses</button>
+        <button id="atmosphere-toggle">Toggle Atmosphere</button>
+      </div>
+      <p id="dev-status">Player: none | Zombies: 0 | Noise: 0 | Lights: 0</p>
+      <small>
+        Click on the playfield with an active cursor tool to place or remove entities. Use the
+        atmosphere toggle to switch between bright lab lighting and moody night mode.
+      </small>
+    </div>
+    <canvas id="game"></canvas>
+    <div id="debug-panels" class="hidden"></div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
