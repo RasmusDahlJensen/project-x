@@ -75,6 +75,7 @@ let atmosphereState = "bright";
 const stimuli = [];
 const lightSources = [];
 const sandboxLights = [];
+const noiseVisuals = [];
 let zombies = [];
 let obstacles = [];
 const zombieDebugPanels = new Map();
@@ -759,7 +760,9 @@ function createLights() {
       radius: lamp.distance * 0.75,
       type: "light",
       dynamic: false,
+      isWorldLight: true
     });
+    lamp.userData.isWorldLight = true;
   });
 
   return group;
@@ -847,6 +850,9 @@ function createNoise(position, strength, radius, ttl = 2) {
     type: "noise",
     fadeRate: strength / Math.max(ttl, 0.1),
   });
+
+  //Visual noise effect
+
   updateSandboxStatus();
 }
 
@@ -911,6 +917,10 @@ function findStimulusForZombie(zombie) {
   });
 
   lightSources.forEach((light) => {
+    if (light.isWorldLight) {
+      return;
+    }
+
     const distance = position.distanceTo(light.position);
     if (distance > light.radius) {
       return;
@@ -931,6 +941,7 @@ function findStimulusForZombie(zombie) {
 
   return bestStimulus;
 }
+
 
 function placePlayer(position) {
   if (!worldRoot) {
