@@ -18,6 +18,10 @@ const atmosphereToggleBtn = document.getElementById("atmosphere-toggle");
 const removeAllZombiesBtn = document.getElementById("remove-all-zombies");
 const debugPanelsContainer = document.getElementById("debug-panels");
 
+//Noise tuning knobs
+const NOISE_RIPPLE_SPEED_MULTIPLIER = 8;
+const CLICK_NOISE_VISUAL_RADIUS = 3;
+
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x11151a, 1);
@@ -216,6 +220,16 @@ function resetWorld() {
 
   stimuli.length = 0;
   lightSources.length = 0;
+
+  noiseVisuals.forEach((entry) => {
+    if (entry.mesh && entry.mesh.parent) {
+      entry.mesh.parent.remove(entry.mesh)
+    }
+    entry.mesh.geometry.dispose();
+    entry.mesh.material.dispose();
+  });
+  noiseVisuals.length = 0
+
   sandboxLights.length = 0;
   zombies = [];
   obstacles = [];
@@ -415,8 +429,8 @@ function updateZombies(dt) {
           stimulus.type === "light"
             ? "Light source"
             : stimulus.type === "noise"
-            ? "Noise origin"
-            : "Point of interest";
+              ? "Noise origin"
+              : "Point of interest";
       }
     }
 
@@ -682,9 +696,9 @@ function createObstacles() {
     wall.rotation.y = i % 2 === 0 ? 0 : Math.PI / 2;
     wall.castShadow = true;
     wall.receiveShadow = true;
-     wall.userData = wall.userData || {};
-     wall.updateMatrixWorld(true);
-     wall.userData.boundingBox = new THREE.Box3().setFromObject(wall);
+    wall.userData = wall.userData || {};
+    wall.updateMatrixWorld(true);
+    wall.userData.boundingBox = new THREE.Box3().setFromObject(wall);
     obstacles.push(wall);
   }
 
@@ -838,9 +852,30 @@ function updateStimuli(dt) {
       sandboxLights.splice(i, 1);
     }
   }
+
+  //This makes the ring grow and fade each frame until it dissapears
+  for (let i = noiseVisuals.length - 1; i >= 0; i -= 1) {
+    const entry = noiseVisuals[i];
+    entry.vttl -= dt;
+
+    const lifeRatio = 1 - Math.max(0, entry.vttl) / entry.initialVttl; // 0→1 over visual lifetime
+    const currentRadius = THREE.MathUtils.lerp(0.001, entry.maxRadius, lifeRatio);
+    entry.mesh.scale.set(currentRadius, currentRadius, 1);
+
+    entry.mesh.material.opacity = Math.max(0, entry.vttl / entry.initialVttl) * 0.75;
+
+    if (entry.vttl <= 0) {
+      if (entry.mesh.parent) entry.mesh.parent.remove(entry.mesh);
+      entry.mesh.geometry.dispose();
+      entry.mesh.material.dispose();
+      noiseVisuals.splice(i, 1);
+    }
+  }
 }
 
-function createNoise(position, strength, radius, ttl = 2) {
+//Createnoise will create a visual ripple expanding outwards
+//The ripple size can be increased if the noise should be visually louder.
+function createNoise(position, strength, radius, ttl = 2, visual = {}) {
   stimuli.push({
     id: `noise-${stimulusIdCounter++}`,
     position: position.clone(),
@@ -851,10 +886,41 @@ function createNoise(position, strength, radius, ttl = 2) {
     fadeRate: strength / Math.max(ttl, 0.1),
   });
 
-  //Visual noise effect
+  const id = `noisevis-${performance.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const ringGeometry = new THREE.RingGeometry(0.95, 1.0, 64);
+  const ringMaterial = new THREE.MeshBasicMaterial({
+    color: 0x66aaff,
+    transparent: true,
+    opacity: 0.75,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    depthTest: false,
+    fog: true,
+  });
+
+  const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.set(position.x, 0.051, position.z);
+  ring.scale.set(0.001, 0.001, 1);
+  ring.renderOrder = 2;
+  (worldRoot ?? scene).add(ring);
+
+  const visualRadius = visual.visualRadius ?? radius;
+  const speed = visual.speed ?? NOISE_RIPPLE_SPEED_MULTIPLIER;
+  const visualTtl = ttl / Math.max(0.001, speed);
+
+  noiseVisuals.push({
+    id,
+    mesh: ring,
+    vttl: visualTtl,
+    initialVttl: visualTtl,
+    maxRadius: visualRadius,
+  });
 
   updateSandboxStatus();
 }
+
 
 function createSandboxLight(point, options = {}) {
   const ttl = options.ttl ?? 12;
@@ -1147,7 +1213,7 @@ function handlePointerDown(event) {
       spawnZombie({ position: new THREE.Vector3(point.x, 1, point.z) });
       break;
     case "noise":
-      createNoise(new THREE.Vector3(point.x, 1, point.z), 18, 14, 6);
+      createNoise(new THREE.Vector3(point.x, 1, point.z), 18, 14, 6, {visualRadius: CLICK_NOISE_VISUAL_RADIUS});
       break;
     case "light":
       createSandboxLight(point, { ttl: 14, intensity: 1.8, radius: 12 });
@@ -1209,6 +1275,15 @@ function clearTransientStimuli() {
       lightSources.splice(i, 1);
     }
   }
+
+  for (let i = noiseVisuals.length - 1; i >= 0; i -= 1) {
+    const entry = noiseVisuals[i];
+    if (entry.mesh?.parent) entry.mesh.parent.remove(entry.mesh);
+    entry.mesh.geometry.dispose();
+    entry.mesh.material.dispose();
+  }
+  noiseVisuals.length = 0;
+
   updateSandboxStatus();
 }
 
