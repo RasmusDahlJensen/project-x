@@ -823,6 +823,7 @@ function updateStimuli(dt) {
     stimulus.strength = Math.max(0, stimulus.strength - stimulus.fadeRate * dt);
     if (stimulus.ttl <= 0 || stimulus.strength <= 0.1) {
       stimuli.splice(i, 1);
+      continue;
     }
   }
 
@@ -871,12 +872,55 @@ function updateStimuli(dt) {
       noiseVisuals.splice(i, 1);
     }
   }
+
+    for (const stimulus of stimuli) {
+    if (stimulus.type !== "noise") continue;
+
+    stimulus.ringLife = Math.min(stimulus.ringTtl, (stimulus.ringLife ?? 0) + dt);
+    stimulus.prevRadius = stimulus.currentRadius;
+    const lifeRatio = stimulus.ringTtl > 0 ? (stimulus.ringLife / stimulus.ringTtl) : 1;
+    stimulus.currentRadius = THREE.MathUtils.lerp(0, stimulus.visualRadius, lifeRatio);
+
+    if (stimulus.prevRadius >= stimulus.currentRadius) continue;
+
+    for (const z of zombies) {
+      if (isGameOver) break;
+      if (stimulus.hit.has(z.id)) continue;
+
+      const dist = z.mesh.position.distanceTo(stimulus.position);
+
+      if (stimulus.prevRadius < dist && dist <= stimulus.currentRadius) {
+        const allow = (z.state !== "chasing");
+
+        if (allow) {
+          const linger = THREE.MathUtils.randFloat(2.5, 4.5);
+          setZombieState(
+            z,
+            "investigating",
+            stimulus.position.clone(),
+            linger,
+            "Heard expanding noise ring",
+            stimulus.id
+          );
+          z.lastStimulusType = "noise";
+          z.currentStimulus = "noise";
+          z.debugTarget = "Noise origin";
+        }
+
+        stimulus.hit.add(z.id);
+      }
+    }
+  }
 }
 
 //Createnoise will create a visual ripple expanding outwards
 //The ripple size can be increased if the noise should be visually louder.
 function createNoise(position, strength, radius, ttl = 2, visual = {}) {
-  stimuli.push({
+  const speed = visual.speed ?? NOISE_RIPPLE_SPEED_MULTIPLIER;
+  const visualRadius = visual.visualRadius ?? radius;
+  const visualTtl = ttl / Math.max(0.001, speed);
+
+  const stim = {
     id: `noise-${stimulusIdCounter++}`,
     position: position.clone(),
     strength,
@@ -884,31 +928,28 @@ function createNoise(position, strength, radius, ttl = 2, visual = {}) {
     ttl,
     type: "noise",
     fadeRate: strength / Math.max(ttl, 0.1),
-  });
+
+    visualRadius,
+    ringTtl: visualTtl,
+    ringLife: 0,
+    prevRadius: 0,
+    currentRadius: 0,
+    hit: new Set(),
+  };
+  stimuli.push(stim);
 
   const id = `noisevis-${performance.now()}-${Math.random().toString(16).slice(2)}`;
-
   const ringGeometry = new THREE.RingGeometry(0.95, 1.0, 64);
   const ringMaterial = new THREE.MeshBasicMaterial({
-    color: 0x66aaff,
-    transparent: true,
-    opacity: 0.75,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-    depthTest: false,
-    fog: true,
+    color: 0x66aaff, transparent: true, opacity: 0.75,
+    side: THREE.DoubleSide, depthWrite: false, depthTest: false, fog: true,
   });
-
   const ring = new THREE.Mesh(ringGeometry, ringMaterial);
   ring.rotation.x = -Math.PI / 2;
   ring.position.set(position.x, 0.051, position.z);
   ring.scale.set(0.001, 0.001, 1);
   ring.renderOrder = 2;
   (worldRoot ?? scene).add(ring);
-
-  const visualRadius = visual.visualRadius ?? radius;
-  const speed = visual.speed ?? NOISE_RIPPLE_SPEED_MULTIPLIER;
-  const visualTtl = ttl / Math.max(0.001, speed);
 
   noiseVisuals.push({
     id,
@@ -920,7 +961,6 @@ function createNoise(position, strength, radius, ttl = 2, visual = {}) {
 
   updateSandboxStatus();
 }
-
 
 function createSandboxLight(point, options = {}) {
   const ttl = options.ttl ?? 12;
@@ -964,18 +1004,17 @@ function createSandboxLight(point, options = {}) {
 function findStimulusForZombie(zombie) {
   const position = zombie.mesh.position;
   const lightWeight = 1.6;
-  const noiseWeight = 1;
+
   let bestStimulus = null;
   let bestScore = 0;
 
   stimuli.forEach((stimulus) => {
+    if (stimulus.type !== "light") return;
     const distance = position.distanceTo(stimulus.position);
-    if (distance > stimulus.radius) {
-      return;
-    }
-    const weight = stimulus.type === "light" ? lightWeight : noiseWeight;
-    const falloff = stimulus.type === "light" ? 0.35 : 0.55;
-    const score = (stimulus.strength * weight) / (1 + distance * falloff);
+    if (distance > stimulus.radius) return;
+
+    const falloff = 0.35;
+    const score = (stimulus.strength * lightWeight) / (1 + distance * falloff);
     if (score > bestScore) {
       bestScore = score;
       bestStimulus = stimulus;
@@ -983,14 +1022,9 @@ function findStimulusForZombie(zombie) {
   });
 
   lightSources.forEach((light) => {
-    if (light.isWorldLight) {
-      return;
-    }
-
+    if (light.isWorldLight) return;
     const distance = position.distanceTo(light.position);
-    if (distance > light.radius) {
-      return;
-    }
+    if (distance > light.radius) return;
     const flicker = 0.9 + Math.random() * 0.25;
     const score = (light.strength * lightWeight * flicker) / (1 + distance * 0.32);
     if (score > bestScore) {
@@ -1007,6 +1041,7 @@ function findStimulusForZombie(zombie) {
 
   return bestStimulus;
 }
+
 
 
 function placePlayer(position) {
