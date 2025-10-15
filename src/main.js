@@ -18,9 +18,13 @@ const atmosphereToggleBtn = document.getElementById("atmosphere-toggle");
 const removeAllZombiesBtn = document.getElementById("remove-all-zombies");
 const debugPanelsContainer = document.getElementById("debug-panels");
 
-//Noise tuning knobs
+//Noise tuning
 const NOISE_RIPPLE_SPEED_MULTIPLIER = 8;
 const CLICK_NOISE_VISUAL_RADIUS = 3;
+
+// Noise memory
+const NOISE_RECALL_COOLDOWN_MS = 10000; // how long a zombie ignores the same emitter after hearing it
+const NOISE_MEMORY_STALE_MS    = 30000; // when to forget an emitter entirely if not heard again
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -346,6 +350,7 @@ function updateZombies(dt) {
     const { mesh } = zombie;
     const previousPosition = mesh.position.clone();
     pruneZombieLightMemory(zombie);
+    pruneZombieNoiseMemory(zombie);
     const distanceToPlayer = hasPlayer ? mesh.position.distanceTo(player.position) : Infinity;
     const toPlayer = hasPlayer
       ? new THREE.Vector3().subVectors(player.position, mesh.position)
@@ -626,6 +631,7 @@ function spawnZombie(options = {}) {
     debugTarget: "None",
     activeStimulusId: null,
     lightMemory: new Map(),
+    noiseMemory: new Map()
   };
 
   zombies.push(zombie);
@@ -873,7 +879,7 @@ function updateStimuli(dt) {
     }
   }
 
-    for (const stimulus of stimuli) {
+  for (const stimulus of stimuli) {
     if (stimulus.type !== "noise") continue;
 
     stimulus.ringLife = Math.min(stimulus.ringTtl, (stimulus.ringLife ?? 0) + dt);
@@ -890,8 +896,18 @@ function updateStimuli(dt) {
       const dist = z.mesh.position.distanceTo(stimulus.position);
 
       if (stimulus.prevRadius < dist && dist <= stimulus.currentRadius) {
-        const allow = (z.state !== "chasing");
+        const key = stimulus.emitterId ?? stimulus.id;
+        const now = performance.now();
+        const mem = z.noiseMemory.get(key);
 
+        const NOISE_RECALL_COOLDOWN_MS = 10000;
+
+        if (mem && now < mem.cooldownUntil) {
+          stimulus.hit.add(z.id);
+          continue;
+        }
+
+        const allow = (z.state !== "chasing");
         if (allow) {
           const linger = THREE.MathUtils.randFloat(2.5, 4.5);
           setZombieState(
@@ -907,8 +923,14 @@ function updateStimuli(dt) {
           z.debugTarget = "Noise origin";
         }
 
+        z.noiseMemory.set(key, {
+          cooldownUntil: now + NOISE_RECALL_COOLDOWN_MS,
+          lastHeard: now,
+        });
+
         stimulus.hit.add(z.id);
       }
+
     }
   }
 }
@@ -922,6 +944,7 @@ function createNoise(position, strength, radius, ttl = 2, visual = {}) {
 
   const stim = {
     id: `noise-${stimulusIdCounter++}`,
+    emitterId: visual.emitterId ?? null,
     position: position.clone(),
     strength,
     radius,
@@ -1248,7 +1271,7 @@ function handlePointerDown(event) {
       spawnZombie({ position: new THREE.Vector3(point.x, 1, point.z) });
       break;
     case "noise":
-      createNoise(new THREE.Vector3(point.x, 1, point.z), 18, 14, 6, {visualRadius: CLICK_NOISE_VISUAL_RADIUS});
+      createNoise(new THREE.Vector3(point.x, 1, point.z), 18, 14, 6, { visualRadius: CLICK_NOISE_VISUAL_RADIUS });
       break;
     case "light":
       createSandboxLight(point, { ttl: 14, intensity: 1.8, radius: 12 });
@@ -1540,3 +1563,14 @@ function pruneZombieLightMemory(zombie) {
     }
   });
 }
+
+function pruneZombieNoiseMemory(zombie) {
+  if (!zombie.noiseMemory || zombie.noiseMemory.size === 0) return;
+  const now = performance.now();
+  zombie.noiseMemory.forEach((entry, key) => {
+    if (now - (entry.lastHeard ?? now) > NOISE_MEMORY_STALE_MS) {
+      zombie.noiseMemory.delete(key);
+    }
+  });
+}
+
