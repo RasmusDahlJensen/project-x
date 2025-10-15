@@ -16,12 +16,22 @@ const startSandboxBtn = document.getElementById("start-sandbox");
 const startGameBtn = document.getElementById("start-game");
 const atmosphereToggleBtn = document.getElementById("atmosphere-toggle");
 const removeAllZombiesBtn = document.getElementById("remove-all-zombies");
+const dayCycleSpeedBtn = document.getElementById("day-cycle-speed");
 const debugPanelsContainer = document.getElementById("debug-panels");
 
 //Noise tuning
 const NOISE_RIPPLE_SPEED_MULTIPLIER = 8;
 const CLICK_NOISE_VISUAL_RADIUS = 3;
 const FOOTSTEP_NOISE_CELL_SIZE = 1.5;
+const DAY_NIGHT_DURATION_SECONDS = 600;
+const DAY_NIGHT_ACCELERATED_MULTIPLIER = 20;
+const DAY_NIGHT_NORMAL_MULTIPLIER = 1;
+const SUN_ORBIT_RADIUS = 52;
+const SUN_ORBIT_HEIGHT = 38;
+const SUN_ORBIT_DEPTH = -28;
+const MOON_ORBIT_RADIUS = 48;
+const MOON_ORBIT_HEIGHT = 34;
+const MOON_ORBIT_DEPTH = 32;
 
 // Noise memory
 const NOISE_RECALL_COOLDOWN_MS = 10000; // how long a zombie ignores the same emitter after hearing it
@@ -52,6 +62,9 @@ const scratchBox = new THREE.Box3();
 const scratchVec1 = new THREE.Vector3();
 const scratchVec2 = new THREE.Vector3();
 const scratchVec3 = new THREE.Vector3();
+const scratchColor1 = new THREE.Color();
+const scratchColor2 = new THREE.Color();
+const scratchColor3 = new THREE.Color();
 
 function disposeMaterial(material) {
   if (!material) {
@@ -88,6 +101,66 @@ function getFootstepEmitterId(position) {
   return `player-footsteps:${cellX}:${cellZ}`;
 }
 
+const atmospherePresets = {
+  bright: {
+    dayAmbientColor: 0x4a5c73,
+    nightAmbientColor: 0x304150,
+    dayFogColor: 0x27323d,
+    nightFogColor: 0x0d1116,
+    dayFogDensity: 0.02,
+    nightFogDensity: 0.035,
+    dayClearColor: 0x1b2631,
+    nightClearColor: 0x11151a,
+    daySunColor: 0xfff3c6,
+    sunsetSunColor: 0xffc581,
+    moonColor: 0xaabbee,
+    dayTileColorA: 0x25313b,
+    dayTileColorB: 0x1f2a33,
+    nightTileColorA: 0x1f2830,
+    nightTileColorB: 0x171d24,
+  },
+  dark: {
+    dayAmbientColor: 0x3b4b5c,
+    nightAmbientColor: 0x25313f,
+    dayFogColor: 0x1d252c,
+    nightFogColor: 0x080b0f,
+    dayFogDensity: 0.026,
+    nightFogDensity: 0.045,
+    dayClearColor: 0x151c23,
+    nightClearColor: 0x090c11,
+    daySunColor: 0xffe6b0,
+    sunsetSunColor: 0xff9e60,
+    moonColor: 0xb6caff,
+    dayTileColorA: 0x1f2a33,
+    dayTileColorB: 0x182028,
+    nightTileColorA: 0x151c24,
+    nightTileColorB: 0x10161c,
+  },
+};
+
+const dayNightCycle = {
+  time: 0,
+  duration: DAY_NIGHT_DURATION_SECONDS,
+  speedMultiplier: DAY_NIGHT_NORMAL_MULTIPLIER,
+  accelerated: false,
+  cachedBlend: 0,
+};
+
+function setDayCycleSpeed(accelerated) {
+  dayNightCycle.accelerated = accelerated;
+  dayNightCycle.speedMultiplier = accelerated
+    ? DAY_NIGHT_ACCELERATED_MULTIPLIER
+    : DAY_NIGHT_NORMAL_MULTIPLIER;
+  if (dayCycleSpeedBtn) {
+    dayCycleSpeedBtn.textContent = accelerated ? "Day Cycle: Fast" : "Day Cycle: Normal";
+  }
+  updateSandboxStatus();
+}
+
+function toggleDayCycleSpeed() {
+  setDayCycleSpeed(!dayNightCycle.accelerated);
+}
+
 const world = {
   size: 22,
   tileSize: 2,
@@ -103,6 +176,7 @@ const zombieMaterial = new THREE.MeshStandardMaterial({
 });
 
 let ambientLight = null;
+let sunLight = null;
 let moonLight = null;
 
 let player = null;
@@ -115,6 +189,7 @@ let isGameOver = false;
 let sandboxTool = null;
 let survivalTime = 0;
 let atmosphereState = "bright";
+let currentAtmospherePreset = atmospherePresets[atmosphereState] || atmospherePresets.bright;
 
 const stimuli = [];
 const lightSources = [];
@@ -136,6 +211,11 @@ canvas.addEventListener("pointerdown", handlePointerDown);
 
 startSandboxBtn.addEventListener("click", () => bootstrap("sandbox"));
 startGameBtn.addEventListener("click", () => bootstrap("game"));
+if (dayCycleSpeedBtn) {
+  dayCycleSpeedBtn.addEventListener("click", () => {
+    toggleDayCycleSpeed();
+  });
+}
 
 spawnZombieBtn.addEventListener("click", () => {
   if (!isInitialized) {
@@ -213,6 +293,7 @@ toolButtons.forEach((button) => {
 });
 
 requestAnimationFrame(animate);
+setDayCycleSpeed(false);
 
 function bootstrap(mode) {
   currentMode = mode;
@@ -303,6 +384,9 @@ function resetWorld() {
   worldRoot = null;
   lightsGroup = null;
   groundTiles = null;
+  ambientLight = null;
+  sunLight = null;
+  moonLight = null;
   zombieDebugPanels.clear();
   if (debugPanelsContainer) {
     debugPanelsContainer.innerHTML = "";
@@ -323,6 +407,7 @@ function buildWorld(mode) {
 
   lightsGroup = createLights();
   scene.add(lightsGroup);
+  updateDayNightCycle(0);
 
   if (mode === "game") {
     player = createPlayer();
@@ -340,6 +425,7 @@ function buildWorld(mode) {
 
 function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
+  updateDayNightCycle(dt);
 
   if (isInitialized) {
     if (!isGameOver) {
@@ -812,17 +898,36 @@ function createLights() {
   ambientLight = new THREE.AmbientLight(0x304150, 0.6);
   group.add(ambientLight);
 
-  moonLight = new THREE.DirectionalLight(0xaabbee, 0.8);
-  moonLight.position.set(-20, 25, -20);
+  sunLight = new THREE.DirectionalLight(0xfff1c4, 1.2);
+  sunLight.position.set(SUN_ORBIT_RADIUS * 0.8, SUN_ORBIT_HEIGHT * 0.6, SUN_ORBIT_DEPTH);
+  sunLight.castShadow = true;
+  sunLight.shadow.mapSize.set(1024, 1024);
+  sunLight.shadow.camera.near = 0.5;
+  sunLight.shadow.camera.far = 90;
+  sunLight.shadow.camera.left = -30;
+  sunLight.shadow.camera.right = 30;
+  sunLight.shadow.camera.top = 30;
+  sunLight.shadow.camera.bottom = -30;
+  sunLight.target.position.set(0, 0, 0);
+  group.add(sunLight);
+  group.add(sunLight.target);
+
+  moonLight = new THREE.DirectionalLight(
+    currentAtmospherePreset ? currentAtmospherePreset.moonColor : 0xaabbee,
+    0.4
+  );
+  moonLight.position.set(-SUN_ORBIT_RADIUS * 0.6, MOON_ORBIT_HEIGHT * 0.7, MOON_ORBIT_DEPTH);
   moonLight.castShadow = true;
   moonLight.shadow.mapSize.set(1024, 1024);
   moonLight.shadow.camera.near = 0.5;
-  moonLight.shadow.camera.far = 80;
-  moonLight.shadow.camera.left = -25;
-  moonLight.shadow.camera.right = 25;
-  moonLight.shadow.camera.top = 25;
-  moonLight.shadow.camera.bottom = -25;
+  moonLight.shadow.camera.far = 90;
+  moonLight.shadow.camera.left = -28;
+  moonLight.shadow.camera.right = 28;
+  moonLight.shadow.camera.top = 28;
+  moonLight.shadow.camera.bottom = -28;
+  moonLight.target.position.set(0, 0, 0);
   group.add(moonLight);
+  group.add(moonLight.target);
 
   const lampColor = 0xff6b3d;
   const lamps = [
@@ -884,6 +989,94 @@ function updateCamera() {
     scratchVec1.z + offsetZ
   );
   camera.lookAt(scratchVec1);
+}
+
+function updateDayNightCycle(dt) {
+  if (!sunLight || !moonLight || !ambientLight || !currentAtmospherePreset) {
+    return;
+  }
+
+  dayNightCycle.time =
+    (dayNightCycle.time + dt * dayNightCycle.speedMultiplier) % dayNightCycle.duration;
+  const phase = dayNightCycle.time / dayNightCycle.duration;
+  const sunAngle = phase * Math.PI * 2;
+  const sunHeight = Math.sin(sunAngle);
+  const sunBlend = THREE.MathUtils.clamp((sunHeight + 0.15) / 1.15, 0, 1);
+  dayNightCycle.cachedBlend = sunBlend;
+
+  const sunX = Math.cos(sunAngle) * SUN_ORBIT_RADIUS;
+  const sunY = Math.max(sunHeight * SUN_ORBIT_HEIGHT, -8);
+  sunLight.position.set(sunX, sunY, SUN_ORBIT_DEPTH);
+  sunLight.target.position.set(0, 0, 0);
+  sunLight.target.updateMatrixWorld();
+
+  const sunWarmFactor = THREE.MathUtils.clamp((sunHeight + 0.05) / 0.7, 0, 1);
+  sunLight.color
+    .copy(scratchColor1.setHex(currentAtmospherePreset.sunsetSunColor))
+    .lerp(scratchColor2.setHex(currentAtmospherePreset.daySunColor), sunWarmFactor);
+  sunLight.intensity = THREE.MathUtils.lerp(0.05, 1.35, sunBlend);
+
+  const moonAngle = sunAngle + Math.PI;
+  const moonHeight = Math.sin(moonAngle);
+  const nightFactor = 1 - sunBlend;
+  const moonX = Math.cos(moonAngle) * MOON_ORBIT_RADIUS;
+  const moonY = Math.max(moonHeight * MOON_ORBIT_HEIGHT, -6);
+  moonLight.position.set(moonX, moonY, MOON_ORBIT_DEPTH);
+  moonLight.target.position.set(0, 0, 0);
+  moonLight.target.updateMatrixWorld();
+  moonLight.color.setHex(currentAtmospherePreset.moonColor);
+  moonLight.intensity = THREE.MathUtils.lerp(0, 0.6, nightFactor);
+
+  const ambientNightColor = scratchColor1.setHex(currentAtmospherePreset.nightAmbientColor);
+  const ambientDayColor = scratchColor2.setHex(currentAtmospherePreset.dayAmbientColor);
+  ambientLight.color.copy(ambientNightColor).lerp(ambientDayColor, sunBlend);
+  ambientLight.intensity = THREE.MathUtils.lerp(0.28, 1.0, sunBlend);
+
+  updateEnvironmentForBlend(sunBlend);
+}
+
+function updateEnvironmentForBlend(blend) {
+  if (!currentAtmospherePreset) {
+    return;
+  }
+  if (!scene.fog) {
+    scene.fog = new THREE.FogExp2(currentAtmospherePreset.nightFogColor, 0.02);
+  }
+
+  const fogNightColor = scratchColor1.setHex(currentAtmospherePreset.nightFogColor);
+  const fogDayColor = scratchColor2.setHex(currentAtmospherePreset.dayFogColor);
+  scene.fog.color.copy(fogNightColor).lerp(fogDayColor, blend);
+  scene.fog.density = THREE.MathUtils.lerp(
+    currentAtmospherePreset.nightFogDensity,
+    currentAtmospherePreset.dayFogDensity,
+    blend
+  );
+
+  scratchColor1.setHex(currentAtmospherePreset.nightClearColor);
+  scratchColor2.setHex(currentAtmospherePreset.dayClearColor);
+  scratchColor3.copy(scratchColor1).lerp(scratchColor2, blend);
+  renderer.setClearColor(scratchColor3.getHex(), 1);
+
+  updateGroundTilesForBlend(blend);
+}
+
+function updateGroundTilesForBlend(blend) {
+  if (!groundTiles || !currentAtmospherePreset) {
+    return;
+  }
+  groundTiles.children.forEach((tile, index) => {
+    const nightHex =
+      index % 2 === 0
+        ? currentAtmospherePreset.nightTileColorA
+        : currentAtmospherePreset.nightTileColorB;
+    const dayHex =
+      index % 2 === 0
+        ? currentAtmospherePreset.dayTileColorA
+        : currentAtmospherePreset.dayTileColorB;
+    const nightColor = scratchColor1.setHex(nightHex);
+    const dayColor = scratchColor2.setHex(dayHex);
+    tile.material.color.copy(nightColor).lerp(dayColor, blend);
+  });
 }
 
 function updateStimuli(dt) {
@@ -1202,43 +1395,15 @@ function applyAtmosphere(mode) {
   if (!scene.fog) {
     scene.fog = new THREE.FogExp2(0x1a2129, 0.02);
   }
-  const brightenTiles = (baseA, baseB) => {
-    if (!groundTiles) {
-      return;
-    }
-    groundTiles.children.forEach((tile, index) => {
-      const base = index % 2 === 0 ? baseA : baseB;
-      tile.material.color.setHex(base);
-    });
-  };
-
-  if (mode === "bright") {
-    renderer.setClearColor(0x1b2631, 1);
-    scene.fog.color.setHex(0x27323d);
-    scene.fog.density = 0.02;
-    if (ambientLight) {
-      ambientLight.color.setHex(0x4a5c73);
-      ambientLight.intensity = 0.95;
-    }
-    if (moonLight) {
-      moonLight.color.setHex(0xe5f0ff);
-      moonLight.intensity = 0.55;
-    }
-    brightenTiles(0x25313b, 0x1f2a33);
-  } else {
-    renderer.setClearColor(0x11151a, 1);
-    scene.fog.color.setHex(0x0d1116);
-    scene.fog.density = 0.035;
-    if (ambientLight) {
-      ambientLight.color.setHex(0x304150);
-      ambientLight.intensity = 0.6;
-    }
-    if (moonLight) {
-      moonLight.color.setHex(0xaabbee);
-      moonLight.intensity = 0.8;
-    }
-    brightenTiles(0x1f2830, 0x171d24);
+  atmosphereState = mode;
+  currentAtmospherePreset = atmospherePresets[mode] || atmospherePresets.dark;
+  if (moonLight) {
+    moonLight.color.setHex(currentAtmospherePreset.moonColor);
   }
+  if (sunLight) {
+    sunLight.color.setHex(currentAtmospherePreset.daySunColor);
+  }
+  updateEnvironmentForBlend(dayNightCycle.cachedBlend);
 }
 
 function setZombieState(zombie, state, target = null, timer = null, reason = "", stimulusId = null) {
@@ -1384,8 +1549,12 @@ function setSandboxTool(tool) {
 }
 
 function updateSandboxStatus() {
+  if (!devStatus) {
+    return;
+  }
   const playerStatus = player ? "present" : "none";
-  devStatus.textContent = `Player: ${playerStatus} | Zombies: ${zombies.length} | Noise: ${stimuli.length} | Lights: ${sandboxLights.length}`;
+  const cycleLabel = dayNightCycle.accelerated ? "fast" : "normal";
+  devStatus.textContent = `Player: ${playerStatus} | Zombies: ${zombies.length} | Noise: ${stimuli.length} | Lights: ${sandboxLights.length} | DayCycle: ${cycleLabel}`;
 }
 
 function clearTransientStimuli() {
