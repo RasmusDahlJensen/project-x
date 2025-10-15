@@ -21,6 +21,7 @@ const debugPanelsContainer = document.getElementById("debug-panels");
 //Noise tuning
 const NOISE_RIPPLE_SPEED_MULTIPLIER = 8;
 const CLICK_NOISE_VISUAL_RADIUS = 3;
+const FOOTSTEP_NOISE_CELL_SIZE = 1.5;
 
 // Noise memory
 const NOISE_RECALL_COOLDOWN_MS = 10000; // how long a zombie ignores the same emitter after hearing it
@@ -51,6 +52,41 @@ const scratchBox = new THREE.Box3();
 const scratchVec1 = new THREE.Vector3();
 const scratchVec2 = new THREE.Vector3();
 const scratchVec3 = new THREE.Vector3();
+
+function disposeMaterial(material) {
+  if (!material) {
+    return;
+  }
+  if (Array.isArray(material)) {
+    material.forEach((item) => disposeMaterial(item));
+    return;
+  }
+  if (typeof material.dispose === "function") {
+    material.dispose();
+  }
+}
+
+function disposeMeshResources(mesh, { disposeGeometry = true } = {}) {
+  if (!mesh) {
+    return;
+  }
+  if (
+    disposeGeometry &&
+    mesh.geometry &&
+    mesh.geometry !== zombieGeometry &&
+    typeof mesh.geometry.dispose === "function"
+  ) {
+    mesh.geometry.dispose();
+  }
+  disposeMaterial(mesh.material);
+}
+
+function getFootstepEmitterId(position) {
+  const cellSize = FOOTSTEP_NOISE_CELL_SIZE;
+  const cellX = Math.round(position.x / cellSize);
+  const cellZ = Math.round(position.z / cellSize);
+  return `player-footsteps:${cellX}:${cellZ}`;
+}
 
 const world = {
   size: 22,
@@ -208,17 +244,44 @@ function bootstrap(mode) {
 }
 
 function resetWorld() {
+  removeAllZombies();
+
+  if (player && player.parent) {
+    player.parent.remove(player);
+  }
+  if (player) {
+    disposeMeshResources(player);
+  }
+  player = null;
+
   if (worldRoot) {
+    if (groundTiles) {
+      groundTiles.children.forEach((tile) => disposeMeshResources(tile));
+    }
+    if (obstacles.length) {
+      obstacles.forEach((obstacle) => disposeMeshResources(obstacle));
+    }
     scene.remove(worldRoot);
   }
   if (lightsGroup) {
+    lightsGroup.traverse((child) => {
+      if (child.isMesh) {
+        disposeMeshResources(child);
+      }
+    });
     scene.remove(lightsGroup);
   }
 
   sandboxLights.forEach((entry) => {
     scene.remove(entry.light);
+    if (typeof entry.light.dispose === "function") {
+      entry.light.dispose();
+    }
     if (entry.helper && entry.helper.parent) {
       entry.helper.parent.remove(entry.helper);
+    }
+    if (entry.helper) {
+      disposeMeshResources(entry.helper);
     }
   });
 
@@ -227,17 +290,15 @@ function resetWorld() {
 
   noiseVisuals.forEach((entry) => {
     if (entry.mesh && entry.mesh.parent) {
-      entry.mesh.parent.remove(entry.mesh)
+      entry.mesh.parent.remove(entry.mesh);
     }
-    entry.mesh.geometry.dispose();
-    entry.mesh.material.dispose();
+    disposeMeshResources(entry.mesh);
   });
-  noiseVisuals.length = 0
+  noiseVisuals.length = 0;
 
   sandboxLights.length = 0;
   zombies = [];
   obstacles = [];
-  player = null;
   stimulusIdCounter = 0;
   worldRoot = null;
   lightsGroup = null;
@@ -330,7 +391,10 @@ function updatePlayer(dt) {
     player.userData.footstepCooldown -= dt;
     if (player.userData.footstepCooldown <= 0) {
       const intensity = sprinting ? 1.4 : 1;
-      createNoise(player.position, 10 * intensity, 8 + intensity * 2, 2.4);
+      const footstepEmitterId = getFootstepEmitterId(player.position);
+      createNoise(player.position, 10 * intensity, 8 + intensity * 2, 2.4, {
+        emitterId: footstepEmitterId,
+      });
       player.userData.footstepCooldown = sprinting ? 0.32 : 0.52;
     }
     player.rotation.y = Math.atan2(moveDir.x, moveDir.z);
@@ -846,9 +910,15 @@ function updateStimuli(dt) {
     if (entry.ttl <= 0) {
       if (entry.light) {
         scene.remove(entry.light);
+        if (typeof entry.light.dispose === "function") {
+          entry.light.dispose();
+        }
       }
       if (entry.helper && entry.helper.parent) {
         entry.helper.parent.remove(entry.helper);
+      }
+      if (entry.helper) {
+        disposeMeshResources(entry.helper);
       }
       const sourceIndex = lightSources.findIndex(
         (source) => source.dynamic && source.id === entry.id
@@ -873,8 +943,7 @@ function updateStimuli(dt) {
 
     if (entry.vttl <= 0) {
       if (entry.mesh.parent) entry.mesh.parent.remove(entry.mesh);
-      entry.mesh.geometry.dispose();
-      entry.mesh.material.dispose();
+      disposeMeshResources(entry.mesh);
       noiseVisuals.splice(i, 1);
     }
   }
@@ -1094,6 +1163,9 @@ function removeZombie(zombie) {
   }
   if (zombie.mesh && zombie.mesh.parent) {
     zombie.mesh.parent.remove(zombie.mesh);
+  }
+  if (zombie.mesh) {
+    disposeMeshResources(zombie.mesh, { disposeGeometry: false });
   }
   removeZombieDebugPanel(zombie);
   zombies.splice(index, 1);
@@ -1322,9 +1394,15 @@ function clearTransientStimuli() {
     const entry = sandboxLights[i];
     if (entry.light) {
       scene.remove(entry.light);
+      if (typeof entry.light.dispose === "function") {
+        entry.light.dispose();
+      }
     }
     if (entry.helper && entry.helper.parent) {
       entry.helper.parent.remove(entry.helper);
+    }
+    if (entry.helper) {
+      disposeMeshResources(entry.helper);
     }
     sandboxLights.splice(i, 1);
   }
@@ -1337,8 +1415,7 @@ function clearTransientStimuli() {
   for (let i = noiseVisuals.length - 1; i >= 0; i -= 1) {
     const entry = noiseVisuals[i];
     if (entry.mesh?.parent) entry.mesh.parent.remove(entry.mesh);
-    entry.mesh.geometry.dispose();
-    entry.mesh.material.dispose();
+    disposeMeshResources(entry.mesh);
   }
   noiseVisuals.length = 0;
 
