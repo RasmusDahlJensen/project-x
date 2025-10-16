@@ -71,6 +71,13 @@ const pointerNdc = new THREE.Vector2();
 const PLAYER_FOV_DEGREES = 90;
 const PLAYER_FOV_COS = Math.cos(THREE.MathUtils.degToRad(PLAYER_FOV_DEGREES / 2));
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const STATIC_MEMORY_DURATION_MS = 12000;
+const DYNAMIC_MEMORY_DURATION_MS = 6000;
+const DYNAMIC_MEMORY_RING_DURATION_MS = 2400;
+const DYNAMIC_MEMORY_RING_MIN_RADIUS = 0.8;
+const DYNAMIC_MEMORY_RING_MAX_RADIUS = 3.2;
+const staticMemory = new Map();
+const dynamicMemory = new Map();
 
 function disposeMaterial(material) {
   if (!material) {
@@ -349,6 +356,7 @@ function bootstrap(mode) {
 
 function resetWorld() {
   removeAllZombies();
+  clearAllMemories();
 
   if (player && player.parent) {
     player.parent.remove(player);
@@ -559,11 +567,13 @@ function resetFieldOfViewVisibility() {
   }
   obstacles.forEach((obstacle) => {
     obstacle.visible = true;
+    hideStaticMemory(obstacle);
   });
   zombies.forEach((zombie) => {
     if (zombie.mesh) {
       zombie.mesh.visible = true;
     }
+    hideDynamicMemory(zombie);
     const panel = zombieDebugPanels.get(zombie);
     if (panel) {
       panel.style.visibility = "visible";
@@ -582,6 +592,280 @@ function resetFieldOfViewVisibility() {
       entry.helper.visible = true;
     }
   });
+}
+
+function getStaticMemoryEntry(mesh) {
+  let entry = staticMemory.get(mesh);
+  if (!entry) {
+    const parent = mesh.parent ?? worldRoot ?? scene;
+    const ghostMaterial = new THREE.MeshBasicMaterial({
+      color: 0x97a4b3,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      depthTest: false,
+    });
+    ghostMaterial.toneMapped = false;
+    const ghost = new THREE.Mesh(mesh.geometry, ghostMaterial);
+    ghost.visible = false;
+    ghost.renderOrder = (mesh.renderOrder ?? 0) + 2;
+    ghost.castShadow = false;
+    ghost.receiveShadow = false;
+    parent.add(ghost);
+    entry = {
+      ghost,
+      lastSeen: 0,
+    };
+    staticMemory.set(mesh, entry);
+  }
+  return entry;
+}
+
+function updateStaticMemoryVisibility(mesh, visible, now) {
+  if (visible) {
+    mesh.visible = true;
+    const entry = getStaticMemoryEntry(mesh);
+    entry.lastSeen = now;
+    if (entry.ghost) {
+      entry.ghost.visible = false;
+      if (entry.ghost.material) {
+        entry.ghost.material.opacity = 0;
+      }
+    }
+    return;
+  }
+
+  mesh.visible = false;
+  const entry = staticMemory.get(mesh);
+  if (!entry || !entry.lastSeen) {
+    if (entry?.ghost) {
+      entry.ghost.visible = false;
+    }
+    return;
+  }
+
+  const elapsed = now - entry.lastSeen;
+  if (elapsed >= STATIC_MEMORY_DURATION_MS) {
+    if (entry.ghost) {
+      entry.ghost.visible = false;
+    }
+    return;
+  }
+
+  const fade = 1 - elapsed / STATIC_MEMORY_DURATION_MS;
+  const ghost = entry.ghost;
+  if (!ghost) {
+    return;
+  }
+  ghost.visible = true;
+  ghost.position.copy(mesh.position);
+  ghost.quaternion.copy(mesh.quaternion);
+  ghost.scale.copy(mesh.scale);
+  const material = ghost.material;
+  if (material) {
+    material.opacity = 0.35 * fade;
+  }
+}
+
+function hideStaticMemory(mesh) {
+  const entry = staticMemory.get(mesh);
+  if (entry?.ghost) {
+    entry.ghost.visible = false;
+    if (entry.ghost.material) {
+      entry.ghost.material.opacity = 0;
+    }
+  }
+}
+
+function getDynamicMemoryEntry(zombie) {
+  let entry = dynamicMemory.get(zombie);
+  if (!entry) {
+    const outlineGeometry = new THREE.EdgesGeometry(zombie.mesh.geometry);
+    const outlineMaterial = new THREE.LineBasicMaterial({
+      color: 0xffd59b,
+      transparent: true,
+      opacity: 0,
+    });
+    outlineMaterial.depthTest = false;
+    outlineMaterial.depthWrite = false;
+    outlineMaterial.toneMapped = false;
+    const outline = new THREE.LineSegments(outlineGeometry, outlineMaterial);
+    outline.visible = false;
+    outline.renderOrder = (zombie.mesh.renderOrder ?? 0) + 5;
+    const parent = zombie.mesh.parent ?? worldRoot ?? scene;
+    parent.add(outline);
+
+    const ringGeometry = new THREE.RingGeometry(0.35, 0.42, 48);
+    const ringMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffb46a,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      depthTest: false,
+    });
+    ringMaterial.toneMapped = false;
+    const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+    ring.visible = false;
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.05;
+    ring.renderOrder = outline.renderOrder + 1;
+    ring.scale.setScalar(DYNAMIC_MEMORY_RING_MIN_RADIUS);
+    const ringParent = worldRoot ?? scene;
+    ringParent.add(ring);
+
+    entry = {
+      outline,
+      ring,
+      lastSeen: 0,
+      lastKnownPosition: new THREE.Vector3(),
+      lastKnownQuaternion: new THREE.Quaternion(),
+      lastKnownScale: new THREE.Vector3(1, 1, 1),
+    };
+    dynamicMemory.set(zombie, entry);
+  }
+  return entry;
+}
+
+function updateDynamicMemoryVisibility(zombie, visible, now) {
+  const mesh = zombie.mesh;
+  if (visible) {
+    mesh.visible = true;
+    const entry = getDynamicMemoryEntry(zombie);
+    entry.lastSeen = now;
+    entry.lastKnownPosition.copy(mesh.position);
+    entry.lastKnownQuaternion.copy(mesh.quaternion);
+    entry.lastKnownScale.copy(mesh.scale);
+    if (entry.outline) {
+      entry.outline.visible = false;
+      if (entry.outline.material) {
+        entry.outline.material.opacity = 0;
+      }
+    }
+    if (entry.ring) {
+      entry.ring.visible = false;
+      if (entry.ring.material) {
+        entry.ring.material.opacity = 0;
+      }
+      entry.ring.scale.setScalar(DYNAMIC_MEMORY_RING_MIN_RADIUS);
+    }
+    return;
+  }
+
+  mesh.visible = false;
+  const entry = dynamicMemory.get(zombie);
+  if (!entry || !entry.lastSeen) {
+    if (entry) {
+      hideDynamicMemory(zombie);
+    }
+    return;
+  }
+
+  const elapsed = now - entry.lastSeen;
+  if (elapsed >= DYNAMIC_MEMORY_DURATION_MS) {
+    hideDynamicMemory(zombie);
+    return;
+  }
+
+  const fade = 1 - elapsed / DYNAMIC_MEMORY_DURATION_MS;
+  const outline = entry.outline;
+  if (outline) {
+    outline.visible = true;
+    outline.position.copy(entry.lastKnownPosition);
+    outline.quaternion.copy(entry.lastKnownQuaternion);
+    outline.scale.copy(entry.lastKnownScale);
+    if (outline.material) {
+      outline.material.opacity = 0.55 * fade * fade;
+    }
+  }
+
+  const ring = entry.ring;
+  if (ring && ring.material) {
+    ring.visible = true;
+    ring.position.set(entry.lastKnownPosition.x, ring.position.y, entry.lastKnownPosition.z);
+    const ringProgress = easeOutCubic(Math.min(1, elapsed / DYNAMIC_MEMORY_RING_DURATION_MS));
+    const radius = THREE.MathUtils.lerp(
+      DYNAMIC_MEMORY_RING_MIN_RADIUS,
+      DYNAMIC_MEMORY_RING_MAX_RADIUS,
+      ringProgress
+    );
+    ring.scale.setScalar(radius);
+    ring.material.opacity = 0.45 * fade * (1 - ringProgress * 0.25);
+  }
+}
+
+function hideDynamicMemory(zombie) {
+  const entry = dynamicMemory.get(zombie);
+  if (!entry) {
+    return;
+  }
+  if (entry.outline) {
+    entry.outline.visible = false;
+    if (entry.outline.material) {
+      entry.outline.material.opacity = 0;
+    }
+  }
+  if (entry.ring) {
+    entry.ring.visible = false;
+    if (entry.ring.material) {
+      entry.ring.material.opacity = 0;
+    }
+    entry.ring.scale.setScalar(DYNAMIC_MEMORY_RING_MIN_RADIUS);
+  }
+}
+
+function disposeDynamicMemory(zombie) {
+  const entry = dynamicMemory.get(zombie);
+  if (!entry) {
+    return;
+  }
+  if (entry.outline) {
+    if (entry.outline.parent) {
+      entry.outline.parent.remove(entry.outline);
+    }
+    disposeMeshResources(entry.outline);
+  }
+  if (entry.ring) {
+    if (entry.ring.parent) {
+      entry.ring.parent.remove(entry.ring);
+    }
+    disposeMeshResources(entry.ring);
+  }
+  dynamicMemory.delete(zombie);
+}
+
+function clearAllMemories() {
+  staticMemory.forEach((entry) => {
+    if (entry.ghost && entry.ghost.parent) {
+      entry.ghost.parent.remove(entry.ghost);
+    }
+    if (entry.ghost) {
+      disposeMeshResources(entry.ghost, { disposeGeometry: false });
+    }
+  });
+  staticMemory.clear();
+
+  dynamicMemory.forEach((entry) => {
+    if (entry.outline && entry.outline.parent) {
+      entry.outline.parent.remove(entry.outline);
+    }
+    if (entry.outline) {
+      disposeMeshResources(entry.outline);
+    }
+    if (entry.ring && entry.ring.parent) {
+      entry.ring.parent.remove(entry.ring);
+    }
+    if (entry.ring) {
+      disposeMeshResources(entry.ring);
+    }
+  });
+  dynamicMemory.clear();
+}
+
+function easeOutCubic(t) {
+  const clamped = THREE.MathUtils.clamp(t, 0, 1);
+  const inv = 1 - clamped;
+  return 1 - inv * inv * inv;
 }
 
 function updateFieldOfView() {
@@ -603,6 +887,7 @@ function updateFieldOfView() {
 
   const originX = player.position.x;
   const originZ = player.position.z;
+  const now = performance.now();
 
   const isWithinFov = (position) => {
     scratchVec1.set(position.x - originX, 0, position.z - originZ);
@@ -619,12 +904,13 @@ function updateFieldOfView() {
   });
 
   obstacles.forEach((obstacle) => {
-    obstacle.visible = isWithinFov(obstacle.position);
+    const visible = isWithinFov(obstacle.position);
+    updateStaticMemoryVisibility(obstacle, visible, now);
   });
 
   zombies.forEach((zombie) => {
     const visible = isWithinFov(zombie.mesh.position);
-    zombie.mesh.visible = visible;
+    updateDynamicMemoryVisibility(zombie, visible, now);
     const panel = zombieDebugPanels.get(zombie);
     if (panel) {
       panel.style.visibility = visible ? "visible" : "hidden";
@@ -1594,6 +1880,7 @@ function removeZombie(zombie) {
   if (zombie.mesh) {
     disposeMeshResources(zombie.mesh, { disposeGeometry: false });
   }
+  disposeDynamicMemory(zombie);
   removeZombieDebugPanel(zombie);
   zombies.splice(index, 1);
   updateSandboxStatus();
