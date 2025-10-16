@@ -17,6 +17,7 @@ const startGameBtn = document.getElementById("start-game");
 const atmosphereToggleBtn = document.getElementById("atmosphere-toggle");
 const removeAllZombiesBtn = document.getElementById("remove-all-zombies");
 const dayCycleSpeedBtn = document.getElementById("day-cycle-speed");
+const spawnDevZombieBtn = document.getElementById("spawn-dev-zombie");
 const debugPanelsContainer = document.getElementById("debug-panels");
 
 //Noise tuning
@@ -65,6 +66,8 @@ const scratchVec3 = new THREE.Vector3();
 const scratchColor1 = new THREE.Color();
 const scratchColor2 = new THREE.Color();
 const scratchColor3 = new THREE.Color();
+const pointerAim = new THREE.Vector3();
+const pointerDir = new THREE.Vector3();
 
 function disposeMaterial(material) {
   if (!material) {
@@ -190,6 +193,7 @@ let sandboxTool = null;
 let survivalTime = 0;
 let atmosphereState = "bright";
 let currentAtmospherePreset = atmospherePresets[atmosphereState] || atmospherePresets.bright;
+let hasPointerAim = false;
 
 const stimuli = [];
 const lightSources = [];
@@ -208,6 +212,10 @@ window.addEventListener("resize", resizeRenderer);
 resizeRenderer();
 
 canvas.addEventListener("pointerdown", handlePointerDown);
+canvas.addEventListener("pointermove", handlePointerMove);
+canvas.addEventListener("pointerleave", () => {
+  hasPointerAim = false;
+});
 
 startSandboxBtn.addEventListener("click", () => bootstrap("sandbox"));
 startGameBtn.addEventListener("click", () => bootstrap("game"));
@@ -226,6 +234,18 @@ spawnZombieBtn.addEventListener("click", () => {
     showModeInfo("Spawned an extra zombie.", 2000);
   }
 });
+
+if (spawnDevZombieBtn) {
+  spawnDevZombieBtn.addEventListener("click", () => {
+    if (!isInitialized) {
+      return;
+    }
+    const zombie = spawnZombie({ behavior: "docile" });
+    if (zombie) {
+      showModeInfo("Docile test zombie deployed.", 2000);
+    }
+  });
+}
 
 spawnPlayerBtn.addEventListener("click", () => {
   if (!isInitialized) {
@@ -388,6 +408,7 @@ function resetWorld() {
   sunLight = null;
   moonLight = null;
   zombieDebugPanels.clear();
+  hasPointerAim = false;
   if (debugPanelsContainer) {
     debugPanelsContainer.innerHTML = "";
   }
@@ -483,9 +504,23 @@ function updatePlayer(dt) {
       });
       player.userData.footstepCooldown = sprinting ? 0.32 : 0.52;
     }
-    player.rotation.y = Math.atan2(moveDir.x, moveDir.z);
   } else {
     player.userData.footstepCooldown = Math.max(player.userData.footstepCooldown - dt, 0);
+  }
+
+  let orientationVec = null;
+  if (hasPointerAim) {
+    pointerDir.subVectors(pointerAim, player.position);
+    pointerDir.y = 0;
+    if (pointerDir.lengthSq() > 0.0004) {
+      orientationVec = pointerDir;
+    }
+  }
+  if (!orientationVec && moveDir.lengthSq() > 0) {
+    orientationVec = moveDir;
+  }
+  if (orientationVec && orientationVec.lengthSq() > 0) {
+    player.rotation.y = Math.atan2(orientationVec.x, orientationVec.z);
   }
 }
 
@@ -498,6 +533,16 @@ function updateZombies(dt) {
 
   zombies.forEach((zombie) => {
     const { mesh } = zombie;
+    if (zombie.isDocile) {
+      zombie.state = "idle";
+      zombie.reason = "Docile testing dummy";
+      zombie.currentStimulus = null;
+      zombie.lastStimulusType = null;
+      zombie.debugTarget = "None";
+      updateZombieDebugEntry(zombie);
+      positionZombieBubble(zombie);
+      return;
+    }
     const previousPosition = mesh.position.clone();
     pruneZombieLightMemory(zombie);
     pruneZombieNoiseMemory(zombie);
@@ -747,9 +792,18 @@ function spawnZombie(options = {}) {
     return null;
   }
 
+  const behavior = options.behavior ?? "aggressive";
+  const isDocile = behavior === "docile";
   const mesh = new THREE.Mesh(zombieGeometry, zombieMaterial.clone());
   mesh.castShadow = true;
   mesh.receiveShadow = true;
+  if (isDocile) {
+    mesh.material.color.setHex(0x76c18f);
+    if (mesh.material.emissive) {
+      mesh.material.emissive.setHex(0x1a3c24);
+    }
+    mesh.material.emissiveIntensity = 0.25;
+  }
 
   const spawnPos =
     options.position ??
@@ -765,18 +819,20 @@ function spawnZombie(options = {}) {
     id: ++zombieIdCounter,
     mesh,
     state: "idle",
+    behavior,
+    isDocile,
     wanderTarget: null,
     target: null,
-    wanderSpeed: 2.1,
-    investigateSpeed: 2.8,
-    speed: 3.6,
-    detectRange: 12,
-    attackRadius: 1.3,
-    damage: 30,
-    decisionTimer: THREE.MathUtils.randFloat(1, 2.5),
+    wanderSpeed: isDocile ? 0 : 2.1,
+    investigateSpeed: isDocile ? 0 : 2.8,
+    speed: isDocile ? 0 : 3.6,
+    detectRange: isDocile ? 0 : 12,
+    attackRadius: isDocile ? 0 : 1.3,
+    damage: isDocile ? 0 : 30,
+    decisionTimer: isDocile ? 0 : THREE.MathUtils.randFloat(1, 2.5),
     investigateTimer: 0,
     lastStimulusType: null,
-    reason: "Standing by",
+    reason: isDocile ? "Docile testing dummy" : "Standing by",
     currentStimulus: null,
     debugTarget: "None",
     activeStimulusId: null,
@@ -842,14 +898,64 @@ function createObstacles() {
   const material = new THREE.MeshStandardMaterial({ color: 0x383f45, roughness: 0.9 });
   const wallGeometry = new THREE.BoxGeometry(2, 2, 0.5);
 
-  for (let i = 0; i < 10; i += 1) {
-    const wall = new THREE.Mesh(wallGeometry, material);
-    wall.position.set(
-      THREE.MathUtils.randFloatSpread(world.size * 0.6),
+  const wallsToCreate = 12;
+  const minDistanceFromCenter = 6;
+  const minDistanceBetweenWalls = 3;
+  const maxAttemptsPerWall = 30;
+
+  const samplePosition = () => {
+    const biasEdge = Math.random() < 0.55;
+    if (biasEdge) {
+      const angle = Math.random() * Math.PI * 2;
+      const radius = THREE.MathUtils.randFloat(
+        world.half * 0.65,
+        world.half * 0.95
+      );
+      return new THREE.Vector3(
+        Math.cos(angle) * radius,
+        1,
+        Math.sin(angle) * radius
+      );
+    }
+    return new THREE.Vector3(
+      THREE.MathUtils.randFloatSpread(world.half * 1.1),
       1,
-      THREE.MathUtils.randFloatSpread(world.size * 0.6)
+      THREE.MathUtils.randFloatSpread(world.half * 1.1)
     );
-    wall.rotation.y = i % 2 === 0 ? 0 : Math.PI / 2;
+  };
+
+  const isTooClose = (candidate) => {
+    const distanceFromCenter = Math.hypot(candidate.x, candidate.z);
+    if (distanceFromCenter < minDistanceFromCenter) {
+      return true;
+    }
+    return obstacles.some((existing) =>
+      existing.position.distanceTo(candidate) < minDistanceBetweenWalls
+    );
+  };
+
+  for (let i = 0; i < wallsToCreate; i += 1) {
+    let attempts = 0;
+    let position = samplePosition();
+    while (isTooClose(position) && attempts < maxAttemptsPerWall) {
+      position = samplePosition();
+      attempts += 1;
+    }
+
+    if (isTooClose(position)) {
+      const direction = new THREE.Vector2(position.x, position.z);
+      if (direction.lengthSq() === 0) {
+        direction.set(1, 0);
+      }
+      direction.normalize().multiplyScalar(minDistanceFromCenter + 1.5);
+      position.set(direction.x, 1, direction.y);
+    }
+
+    const wall = new THREE.Mesh(wallGeometry, material);
+    wall.position.copy(position);
+    clampToWorld(wall.position);
+    wall.rotation.y =
+      (i % 2 === 0 ? 0 : Math.PI / 2) + THREE.MathUtils.randFloatSpread(Math.PI / 6);
     wall.castShadow = true;
     wall.receiveShadow = true;
     wall.userData = wall.userData || {};
@@ -1490,7 +1596,21 @@ function handleObstacleCollisions(entity, previousPosition) {
   }
 }
 
+function handlePointerMove(event) {
+  if (!groundTiles) {
+    return;
+  }
+  const point = getGroundIntersection(event);
+  if (point) {
+    pointerAim.copy(point);
+    hasPointerAim = true;
+  } else {
+    hasPointerAim = false;
+  }
+}
+
 function handlePointerDown(event) {
+  handlePointerMove(event);
   if (event.button !== 0 || !isInitialized || currentMode !== "sandbox" || !sandboxTool) {
     return;
   }
@@ -1506,6 +1626,12 @@ function handlePointerDown(event) {
       break;
     case "zombie":
       spawnZombie({ position: new THREE.Vector3(point.x, 1, point.z) });
+      break;
+    case "dev-zombie":
+      spawnZombie({
+        position: new THREE.Vector3(point.x, 1, point.z),
+        behavior: "docile",
+      });
       break;
     case "noise":
       createNoise(new THREE.Vector3(point.x, 1, point.z), 18, 14, 6, { visualRadius: CLICK_NOISE_VISUAL_RADIUS });
@@ -1554,7 +1680,9 @@ function updateSandboxStatus() {
   }
   const playerStatus = player ? "present" : "none";
   const cycleLabel = dayNightCycle.accelerated ? "fast" : "normal";
-  devStatus.textContent = `Player: ${playerStatus} | Zombies: ${zombies.length} | Noise: ${stimuli.length} | Lights: ${sandboxLights.length} | DayCycle: ${cycleLabel}`;
+  const docileCount = zombies.filter((zombie) => zombie.isDocile).length;
+  const activeCount = zombies.length - docileCount;
+  devStatus.textContent = `Player: ${playerStatus} | Zombies: ${activeCount} | Docile: ${docileCount} | Noise: ${stimuli.length} | Lights: ${sandboxLights.length} | DayCycle: ${cycleLabel}`;
 }
 
 function clearTransientStimuli() {
