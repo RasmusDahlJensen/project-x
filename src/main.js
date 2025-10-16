@@ -54,7 +54,6 @@ const isoTilt = THREE.MathUtils.degToRad(35);
 
 const clock = new THREE.Clock();
 const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
 const bubbleOffset = new THREE.Vector3(0, 2.6, 0);
 const bubbleProjection = new THREE.Vector3();
 const defaultFocus = new THREE.Vector3(0, 0, 0);
@@ -68,6 +67,10 @@ const scratchColor2 = new THREE.Color();
 const scratchColor3 = new THREE.Color();
 const pointerAim = new THREE.Vector3();
 const pointerDir = new THREE.Vector3();
+const pointerNdc = new THREE.Vector2();
+const PLAYER_FOV_DEGREES = 90;
+const PLAYER_FOV_COS = Math.cos(THREE.MathUtils.degToRad(PLAYER_FOV_DEGREES / 2));
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 function disposeMaterial(material) {
   if (!material) {
@@ -457,6 +460,7 @@ function animate() {
     updatePlayer(dt);
     updateStimuli(dt);
     updateZombies(dt);
+    updateFieldOfView();
     updateCamera();
 
     if (currentMode === "sandbox") {
@@ -473,12 +477,31 @@ function updatePlayer(dt) {
     return;
   }
 
+  refreshPointerAim();
+
   const previousPosition = player.position.clone();
   const moveDir = new THREE.Vector3();
-  if (keys.has("KeyW")) moveDir.z -= 1;
-  if (keys.has("KeyS")) moveDir.z += 1;
-  if (keys.has("KeyA")) moveDir.x -= 1;
-  if (keys.has("KeyD")) moveDir.x += 1;
+
+  const cameraForward = scratchVec1;
+  camera.getWorldDirection(cameraForward);
+  cameraForward.y = 0;
+  if (cameraForward.lengthSq() < 1e-6) {
+    cameraForward.set(0, 0, -1);
+  } else {
+    cameraForward.normalize();
+  }
+
+  const cameraRight = scratchVec2.copy(cameraForward).cross(WORLD_UP);
+  if (cameraRight.lengthSq() < 1e-6) {
+    cameraRight.set(1, 0, 0);
+  } else {
+    cameraRight.normalize();
+  }
+
+  if (keys.has("KeyW")) moveDir.add(cameraForward);
+  if (keys.has("KeyS")) moveDir.addScaledVector(cameraForward, -1);
+  if (keys.has("KeyA")) moveDir.addScaledVector(cameraRight, -1);
+  if (keys.has("KeyD")) moveDir.add(cameraRight);
 
   if (moveDir.lengthSq() > 0) {
     moveDir.normalize();
@@ -520,8 +543,108 @@ function updatePlayer(dt) {
     orientationVec = moveDir;
   }
   if (orientationVec && orientationVec.lengthSq() > 0) {
+    orientationVec.normalize();
     player.rotation.y = Math.atan2(orientationVec.x, orientationVec.z);
+    if (player.userData && player.userData.viewDirection) {
+      player.userData.viewDirection.copy(orientationVec);
+    }
   }
+}
+
+function resetFieldOfViewVisibility() {
+  if (groundTiles) {
+    groundTiles.children.forEach((tile) => {
+      tile.visible = true;
+    });
+  }
+  obstacles.forEach((obstacle) => {
+    obstacle.visible = true;
+  });
+  zombies.forEach((zombie) => {
+    if (zombie.mesh) {
+      zombie.mesh.visible = true;
+    }
+    const panel = zombieDebugPanels.get(zombie);
+    if (panel) {
+      panel.style.visibility = "visible";
+    }
+  });
+  noiseVisuals.forEach((entry) => {
+    if (entry.mesh) {
+      entry.mesh.visible = true;
+    }
+  });
+  sandboxLights.forEach((entry) => {
+    if (entry.light) {
+      entry.light.visible = true;
+    }
+    if (entry.helper) {
+      entry.helper.visible = true;
+    }
+  });
+}
+
+function updateFieldOfView() {
+  if (!groundTiles) {
+    return;
+  }
+
+  if (!player || !player.userData || !player.userData.viewDirection) {
+    resetFieldOfViewVisibility();
+    return;
+  }
+
+  const forward = scratchVec3.copy(player.userData.viewDirection);
+  if (forward.lengthSq() < 1e-6) {
+    resetFieldOfViewVisibility();
+    return;
+  }
+  forward.normalize();
+
+  const originX = player.position.x;
+  const originZ = player.position.z;
+
+  const isWithinFov = (position) => {
+    scratchVec1.set(position.x - originX, 0, position.z - originZ);
+    const distSq = scratchVec1.lengthSq();
+    if (distSq < 1e-4) {
+      return true;
+    }
+    scratchVec1.normalize();
+    return scratchVec1.dot(forward) >= PLAYER_FOV_COS;
+  };
+
+  groundTiles.children.forEach((tile) => {
+    tile.visible = isWithinFov(tile.position);
+  });
+
+  obstacles.forEach((obstacle) => {
+    obstacle.visible = isWithinFov(obstacle.position);
+  });
+
+  zombies.forEach((zombie) => {
+    const visible = isWithinFov(zombie.mesh.position);
+    zombie.mesh.visible = visible;
+    const panel = zombieDebugPanels.get(zombie);
+    if (panel) {
+      panel.style.visibility = visible ? "visible" : "hidden";
+    }
+  });
+
+  noiseVisuals.forEach((entry) => {
+    if (entry.mesh) {
+      entry.mesh.visible = isWithinFov(entry.mesh.position);
+    }
+  });
+
+  sandboxLights.forEach((entry) => {
+    if (entry.light) {
+      entry.light.visible = isWithinFov(entry.light.position);
+    }
+    if (entry.helper) {
+      entry.helper.visible = isWithinFov(entry.helper.position);
+    }
+  });
 }
 
 function updateZombies(dt) {
@@ -773,6 +896,7 @@ function createPlayer() {
     speed: 7,
     health: 100,
     footstepCooldown: 0,
+    viewDirection: new THREE.Vector3(0, 0, 1),
     onDamage: (amount) => {
       body.userData.health = Math.max(body.userData.health - amount, 0);
       healthEl.textContent = `Health: ${body.userData.health.toFixed(0)}`;
@@ -1449,7 +1573,11 @@ function placePlayer(position) {
   if (player.userData) {
     player.userData.health = 100;
     player.userData.footstepCooldown = 0;
+    if (player.userData.viewDirection) {
+      player.userData.viewDirection.set(0, 0, 1);
+    }
   }
+  player.rotation.y = 0;
   healthEl.textContent = `Health: ${player.userData.health.toFixed(0)}`;
   updateSandboxStatus();
   return player;
@@ -1596,29 +1724,62 @@ function handleObstacleCollisions(entity, previousPosition) {
   }
 }
 
-function handlePointerMove(event) {
+function updatePointerNdcFromEvent(event) {
+  pointerNdc.set(
+    (event.clientX / window.innerWidth) * 2 - 1,
+    -(event.clientY / window.innerHeight) * 2 + 1
+  );
+}
+
+function computeGroundIntersection(target) {
   if (!groundTiles) {
+    return false;
+  }
+
+  raycaster.setFromCamera(pointerNdc, camera);
+  const { origin, direction } = raycaster.ray;
+  const epsilon = 1e-5;
+  if (Math.abs(direction.y) < epsilon) {
+    return false;
+  }
+
+  const distanceToPlane = -origin.y / direction.y;
+  if (distanceToPlane < 0) {
+    return false;
+  }
+
+  target.copy(direction).multiplyScalar(distanceToPlane).add(origin);
+  target.y = 0;
+  clampToWorld(target);
+  return true;
+}
+
+function refreshPointerAim() {
+  if (!hasPointerAim) {
     return;
   }
-  const point = getGroundIntersection(event);
-  if (point) {
-    pointerAim.copy(point);
-    hasPointerAim = true;
-  } else {
+  if (!computeGroundIntersection(pointerAim)) {
     hasPointerAim = false;
   }
 }
 
+function handlePointerMove(event) {
+  updatePointerNdcFromEvent(event);
+  hasPointerAim = computeGroundIntersection(pointerAim);
+}
+
 function handlePointerDown(event) {
-  handlePointerMove(event);
+  updatePointerNdcFromEvent(event);
+  const pointerUpdated = computeGroundIntersection(pointerAim);
+  hasPointerAim = pointerUpdated;
   if (event.button !== 0 || !isInitialized || currentMode !== "sandbox" || !sandboxTool) {
     return;
   }
 
-  const point = getGroundIntersection(event);
-  if (!point) {
+  if (!pointerUpdated) {
     return;
   }
+  const point = pointerAim.clone();
 
   switch (sandboxTool) {
     case "player":
@@ -1652,19 +1813,13 @@ function handlePointerDown(event) {
 }
 
 function getGroundIntersection(event) {
-  if (!groundTiles) {
+  if (event) {
+    updatePointerNdcFromEvent(event);
+  }
+  if (!computeGroundIntersection(scratchVec2)) {
     return null;
   }
-
-  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
-
-  const intersects = raycaster.intersectObjects(groundTiles.children, false);
-  if (!intersects.length) {
-    return null;
-  }
-  return intersects[0].point;
+  return scratchVec2.clone();
 }
 
 function setSandboxTool(tool) {
