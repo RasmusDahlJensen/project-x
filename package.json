@@ -1,0 +1,28 @@
+{
+  "name": "project-x",
+  "version": "1.0.0",
+  "description": "This is a minimal playable prototype inspired by Project Zomboid. It demonstrates an isometric camera, basic survivor controls, and roaming zombies inside a lightweight Three.js scene.",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "watch": "tsc --project tsconfig.json --watch"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RasmusDahlJensen/project-x.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/RasmusDahlJensen/project-x/issues"
+  },
+  "homepage": "https://github.com/RasmusDahlJensen/project-x#readme",
+  "dependencies": {
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.160.0",
+    "typescript": "^5.9.3"
+  }
+}

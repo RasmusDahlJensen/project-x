@@ -1,0 +1,9 @@
+# Node / TypeScript artifacts
+node_modules/
+dist/
+package-lock.json
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+*.log

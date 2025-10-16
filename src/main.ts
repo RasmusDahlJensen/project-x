@@ -1,4 +1,5 @@
-import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+// @ts-nocheck
+import * as THREE from "three";
 
 const canvas = document.getElementById("game");
 const statusTimeEl = document.getElementById("survival-time");
@@ -1644,7 +1645,7 @@ function updateStimuli(dt) {
     const entry = noiseVisuals[i];
     entry.vttl -= dt;
 
-    const lifeRatio = 1 - Math.max(0, entry.vttl) / entry.initialVttl; // 0‚Üí1 over visual lifetime
+    const lifeRatio = 1 - Math.max(0, entry.vttl) / entry.initialVttl; // 0‘Â∆1 over visual lifetime
     const currentRadius = THREE.MathUtils.lerp(0.001, entry.maxRadius, lifeRatio);
     entry.mesh.scale.set(currentRadius, currentRadius, 1);
 
